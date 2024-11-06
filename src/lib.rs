@@ -1,5 +1,6 @@
 mod texture;
 
+use std::env::var_os;
 use std::io::Read;
 
 use image::RgbaImage;
@@ -14,7 +15,9 @@ use winit::{
 use wgpu::util::DeviceExt;
 
 use enigo::{Enigo, Mouse, Settings};
+use libwayshot::WayshotConnection;
 use xcap::Monitor;
+use wgpu::PresentMode;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -164,7 +167,7 @@ impl<'a> State<'a> {
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: surface_caps.present_modes[0],
+            present_mode: PresentMode::AutoVsync,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -368,6 +371,20 @@ impl<'a> State<'a> {
     }
 }
 
+fn wayland_detect() -> bool {
+    let xdg_session_type = var_os("XDG_SESSION_TYPE")
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    let wayland_display = var_os("WAYLAND_DISPLAY")
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    xdg_session_type.eq("wayland") || wayland_display.to_lowercase().contains("wayland")
+}
+
 pub async fn run() {
     env_logger::init();
     let event_loop = EventLoop::new().unwrap();
@@ -380,8 +397,23 @@ pub async fn run() {
     );
 
     let tempMon = monitor.clone().unwrap();
-
-    let monitors = Monitor::from_point(tempMon.position().x, tempMon.position().y);
+    let screenshot: Vec<u8>;
+    let (width, height): (u32, u32);
+    if(wayland_detect()) {
+        let wayshot_connection =
+            WayshotConnection::new().expect("failed to connect to the wayland display server");
+        let temp_screenshot = wayshot_connection
+            .screenshot_single_output(wayshot_connection.get_all_outputs().iter().find(|x| x.name == monitor.clone().unwrap().name().unwrap()).unwrap(), false)
+            .expect("failed to take a screenshot");
+        (width, height) = temp_screenshot.dimensions();
+        screenshot = temp_screenshot.as_raw().to_owned();
+    } else {
+        let screen = Monitor::from_point(tempMon.position().x, tempMon.position().y).unwrap();
+        let temp_screenshot = screen.capture_image().unwrap();
+        screenshot = temp_screenshot.as_raw().to_owned();
+        (width, height) = (temp_screenshot.width(), temp_screenshot.height());
+        temp_screenshot.save("target/test.png").unwrap();
+    }
 
     let window = WindowBuilder::new()
         .with_title("A fantastic window!")
@@ -393,7 +425,7 @@ pub async fn run() {
         .unwrap();
 
     // State::new uses async code, so we're going to wait for it to finish
-    let mut state = State::new(&window, monitors.unwrap().capture_image().unwrap()).await;
+    let mut state = State::new(&window, RgbaImage::from_raw(width, height, screenshot).unwrap()).await;
     let mut surface_configured = false;
 
     let _ = event_loop
